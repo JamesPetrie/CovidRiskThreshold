@@ -1,0 +1,326 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+require(ggplot2)
+require(data.table)
+require(plyr)
+library(hrbrthemes)
+require(plot.matrix)
+require(xtable)
+
+library(cowplot)
+
+theme1 = theme_half_open()  + theme(text = element_text(size = 20) , axis.text= element_text(size = 18))
+theme2 = theme_half_open()  + theme(text = element_text(size = 20) , axis.text= element_text(size = 18), legend.position = "none")
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+riskThresh = function(P,N,Qi, Qn, Rt, R0,costFn){
+  cost = (Qi+Qn)*costFn(1) + (P-Qi-Qn)*costFn(pmax(0,1-Rt/R0*N/(N-Qi)))
+  costi = (Qi+Qn+1)*costFn(1) + (P-Qi-Qn-1)*costFn(pmax(0,1-Rt/R0*N/(N-Qi-1)))
+  costn = (Qi+Qn+1)*costFn(1) + (P-Qi-Qn-1)*costFn(pmax(0,1-Rt/R0*N/(N-Qi)))
+  return((costn - cost)/(costn - costi))
+}
+
+riskThresh2 = function(P,N,Qi, Qn, Rt, R0,costFn){
+  cost = (Qi+Qn)*costFn(1) + (P-Qi-Qn)*costFn(pmax(0,1-sqrt(Rt/R0*N/(N-Qi))))
+  costi = (Qi+Qn+1)*costFn(1) + (P-Qi-Qn-1)*costFn(pmax(0,1-sqrt(Rt/R0*N/(N-Qi-1))))
+  costn = (Qi+Qn+1)*costFn(1) + (P-Qi-Qn-1)*costFn(pmax(0,1-sqrt(Rt/R0*N/(N-Qi))))
+  return((costn - cost)/(costn - costi))
+}
+
+socialCost1 = function(x){
+  return(x)
+}
+
+
+
+socialCost2 = function(x){
+  return(x + 3*x^3)
+}
+
+socialCostDeriv2 = function(x){
+  return(1 + 9*x^2)
+}
+
+
+socialCost3 = function(x){
+  return(sqrt(x))
+}
+
+dt = data.table(Distancing = seq(0,1,0.001))
+dt[,cost1 := socialCost1(Distancing)]
+dt[,cost2 := socialCost2(Distancing)]
+
+plotDt = melt(dt, measure.vars = c("cost1",  "cost2")) 
+
+p1 <- ggplot(plotDt, aes(x = Distancing, y = value, colour = variable)) + geom_line(size = 2) + ylab("Cost")  + xlab("Distancing") + scale_color_discrete(name = "Cost Function", labels = c("f(x) = x","f(x) = x + 3*x^3")) +  xlab("Distancing") + theme(text = element_text(size = 35), legend.position = c(0.35, 0.75))
+print(p1)
+#ggsave("~/Desktop/OptimalQuarantine/marginalValue/costFunctions.pdf", p, "pdf")
+
+
+#plotDt[, ThresholdRatio := ((socialCost2(1) - socialCost2(Distancing))/(1-Distancing))/socialCostDeriv2(Distancing)]
+#p2 <- ggplot(plotDt, aes(x = Distancing, y = ThresholdRatio)) + geom_line(size = 2) + ylab(expression(Ratio (r[2]/r[1])))  + xlab("Distancing") + theme(text = element_text(size = 35))
+#ggsave("~/Desktop/OptimalQuarantine/marginalValue/ThresholdRatio.pdf", p, "pdf")
+
+
+P = 1e6
+Qn = 100
+Qi = 100
+N = 1000
+R0 = 4
+Rt = 1
+dt = data.table(Qi = seq(0,N,1))
+dt[,r1 := riskThresh(P,N,Qi, Qn, Rt, R0,socialCost1)]
+dt[,r2 := riskThresh(P,N,Qi, Qn, Rt, R0,socialCost2)]
+plot(dt$r2/dt$r1)
+
+#expression(Ratio (r[2]/r[1]))
+p2 <- ggplot(dt, aes(x = Qi/N, y = r2/r1)) + geom_line(size = 2) + ylab("Increase in risk threshold" )  + xlab("Fraction Quarantined") + theme(text = element_text(size =20)) + xlim(0,1-Rt/R0)
+
+
+
+
+
+p = plot_grid(p1, p2, nrow = 2, labels = c('A', 'B'), label_size = 25)
+print(p)
+ggsave("~/Desktop/Covid/marginalValue/CostFnComparison.pdf", p, "pdf", width = 6, height = 10)
+
+```
+
+```{r}
+R = 1
+scale = 0.1
+P = 10e6
+C = 150
+
+createRiskDt = function(shape, scale){
+  x = seq(0.00001,1, 0.00001)
+  dx = x[2] - x[1]
+  y = 1/(scale^shape * gamma(shape) ) * x^(shape-1)* exp(-x/scale) #dgamma(x, shape = 2, scale = 0.1)
+  
+  
+  y = y/(sum(y)*dx)
+  
+
+  
+  riskDt = data.table(Risk = x, Density = y)
+  return(riskDt)
+}
+
+expectedBenefit = function(rThresh, riskDt){
+  dx = riskDt[2,Risk] - riskDt[1,Risk]
+  return(sum(riskDt[Risk > rThresh, (Risk - rThresh)/rThresh*Density*dx]))
+}
+
+shapeVals = c(0.5,1,2)
+
+dt = rbindlist(llply(shapeVals, function(shape){
+  riskDt = createRiskDt(shape,scale/shape)
+  meanRisk = sum(riskDt$Risk*riskDt$Density)/sum(riskDt$Density)
+  print(meanRisk)
+  avContacts = R/meanRisk
+  
+  vals = 10^seq(2,6.6, by = 0.01)
+  totalBenefit = sapply(vals, function(I){
+    Qi = 0.4*I
+    Qn = 4*Qi
+    rThresh = (I-Qi - 1)/(P-Qi - Qn - 1)
+    numContacts = avContacts*I*0.1 # 0.1 is fraction reached
+    return(numContacts*expectedBenefit(rThresh, riskDt))
+  })
+  return(data.table(Prevalence = vals/P, Benefit = totalBenefit, Shape = shape))
+}))
+
+
+
+
+
+
+shapeDt = rbindlist(llply(shapeVals, function(shape){
+  riskDt = createRiskDt(shape,scale/shape)
+  riskDt$Shape = shape
+  return(riskDt)
+}))
+
+
+scientific_10 <- function(x) {
+  parse(text=gsub("1e", "10^", scales::scientific_format()(x)))
+}
+
+shapeDt[, Shape := as.factor(Shape)]
+p1 = ggplot(shapeDt, aes(x = Risk, y = Density, colour = Shape)) + geom_line() + ylim(0,15) + theme(text = element_text(size =20)) + theme1 + theme(legend.position = c(0.8,0.8))
+
+
+
+
+dt[, Shape := as.factor(Shape)]
+p2 = ggplot(dt, aes(x = Prevalence, y = Benefit*150*30/P, colour = Shape)) + geom_line() + ylab("Monthly Value Per Capita ($)" )  + xlab("I/P") + theme(text = element_text(size =18)) + scale_x_log10(label=scientific_10) + theme2# todo: try to change x axis to 10^-4, etc.
+
+p = plot_grid(p1, p2, nrow = 2, labels = c('A', 'B'), label_size = 25)
+
+ggsave("~/Desktop/Covid/marginalValue/BenefitVsPrevalence.pdf", p, "pdf", width = 6, height = 10)
+
+print(p)
+```
+
+#modify risk distributions by splitting population contacts into two groups (50/50 odds) for indoor and outdoor contact. Make average risk of indoor contact be 15x higher (then normalize)
+
+# meanrisk = 0.1 = 0.5*mi + 0.5* mo
+# mi = 15mo
+
+# 0.1 = 0.5*15*mo + 0.5*mo
+# mo = 0.1/(0.5*15 + 0.5) = 0.0125
+# mi = 15*mo = 0.1875
+
+
+```{r}
+
+createIndoorOutdoorRiskDt = function(shape, meanRisk, indoorMult, indoorFrac){
+  x = seq(0.0001,1, 0.0001)
+  dx = x[2] - x[1]
+  
+  measuredMeanRisk = 1e6
+  mr = meanRisk
+  count = 0
+  while(abs(meanRisk - measuredMeanRisk) > 1e-5 && count < 100){
+      mo = mr/(indoorFrac*indoorMult + (1 - indoorFrac))
+      mi = indoorMult*mo
+    
+      scaleIndoor = mi/shape
+      scaleOutdoor = mo/shape
+      
+      yIndoor = 1/(scaleIndoor^shape * gamma(shape) ) * x^(shape-1)* exp(-x/scaleIndoor) 
+      
+      yOutdoor = 1/(scaleOutdoor^shape * gamma(shape) ) * x^(shape-1)* exp(-x/scaleOutdoor) 
+      
+      y = yOutdoor*(1 - indoorFrac) + yIndoor*indoorFrac
+      
+      y = y/(sum(y)*dx)
+      
+    
+    
+      riskDt = data.table(Risk = x, Density = y)
+      measuredMeanRisk = riskDt[,sum(Density*Risk)/sum(Density)]
+      #print(measuredMeanRisk)
+      
+      mr = mr + (meanRisk - measuredMeanRisk)
+
+      count = count +1
+  }
+
+  return(riskDt)
+}
+
+riskDt = createIndoorOutdoorRiskDt(2, 0.06, 15, 0.5)
+print(expectedBenefit(2e-2, riskDt))
+
+riskDt = createIndoorOutdoorRiskDt(2, 0.06, 1, 0.5)
+print(expectedBenefit(2e-2, riskDt))
+
+
+```
+
+
+```{r}
+
+# assume all people have the app and everyone gets tested and enters their positive diagnosis. This is the estimated risk distribution for a contact.
+
+
+R0 = 4
+
+# assume that the number of cases is constant, then for each infectious person there must be an average of N contacts drawn from this distribution, and N*E[risk] = 1
+N = 1/sum(y*x*dx)
+
+riskDt = createRiskDt(1, 0.1)
+
+dailyValue = function(FracSusceptible, AppEffectiveness){
+  S = P *FracSusceptible
+  Rt = R0 * S/P
+  if(Rt < 1) return(0)
+  
+  I = P * 0.2/365*10 # rate of 20% of population infected in a year, each person infected for 10 days
+  Qi = 0.4*I
+  Qn = Qi*4
+  dollarValue = 150
+  
+  meanRisk = sum(riskDt$Risk*riskDt$Density)/sum(riskDt$Density)
+  avContacts = R/meanRisk
+ 
+  socialCostTest = function(x){
+    return(x + 1*x^3)
+  } 
+  rThresh = riskThresh(S,I,Qi, Qn, 1, R0,socialCostTest) #(I - Qi - 1)/(S - Qi - Qn - 1)
+  print(rThresh)
+
+  benefitPerContact = expectedBenefit(rThresh, riskDt)
+  dollarBenefitPerContact = dollarValue * benefitPerContact
+  numNotifiedContacts = I*avContacts*AppEffectiveness
+  return(dollarBenefitPerContact*numNotifiedContacts)
+}
+
+```
+
+```{r}
+# App effectivenss is fraction of currently infectious people who receive an exposure notification and would quarantine if instructed to
+# Function of a lot of things (adoption rate, upload rate, testing rate, quarantine compliance, manual contact tracing)
+# 
+#AppEffectiveness = 0.12*0.5
+# 1*0.5^2*0.5*1,  1*0.15^2*0.5*1, 0.3*0.15^2*0.5*0.5
+dt = expand.grid(AppEffectiveness = c( 0.1), FracSusceptible = seq(0,1,0.01))
+#dt = expand.grid(AppEffectiveness = c( 0.12*0.5), FracSusceptible = c(0.5))
+dt = data.table(dt)
+
+# UK: 72% upload, 28% of population
+
+dt$Value = apply(dt, 1, function(i){ 
+  return(dailyValue(i[["FracSusceptible"]], i[["AppEffectiveness"]]))
+})
+dt = dt[Value > 0]
+dt[, AppEffectiveness := as.factor(AppEffectiveness)]
+
+dt[, Type := "Immune exempt from distancing"]
+newDt = copy(dt)
+newDt[, Type := "Immune not exempt"]
+newDt[, Value := max(Value), by = AppEffectiveness]
+dt = rbind(dt, newDt)
+
+
+p = ggplot(dt, aes(x = FracSusceptible, y = 30*Value/P, linetype = Type)) + geom_line() + xlab("Fraction Susceptible") + ylab("Monthly Value Per Capita ($)") +
+  scale_linetype_manual(values=c("longdash", "solid")) + theme(text = element_text(size =20), legend.position = "None")
+ggsave("~/Desktop/Covid/marginalValue/fractionSusceptible.pdf", p, "pdf")
+print(p)
+```
+
+```{r}
+  populationSize = 10e6
+  positiveFraction = 0.02
+  avNumContacts = 1/0.06
+  fracApp = 0.2
+  fracUpload = 0.5
+  fracQuarantine = 0.5
+  avBenefit = 2.05 # 2.32 with indoor/outdoor, 2.05 without
+  dailyValue = 150
+  daysQuarantine = 10
+  
+  value = populationSize*positiveFraction*avNumContacts*fracApp^2*fracUpload*fracQuarantine*avBenefit*daysQuarantine*dailyValue
+  print(value)
+  
+  # with indoor/outdoor: $116 million, or $11.6 per capita
+  # without: $102.5 million, or $10.2 per capita
+
+```
+
